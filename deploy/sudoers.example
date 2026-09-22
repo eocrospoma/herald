@@ -1,0 +1,18 @@
+# Herald needs to run a handful of specific, non-interactive commands as
+# root. This rule is scoped to exactly those command lines - do NOT widen
+# it to blanket NOPASSWD access to nft/systemctl, which would let a
+# compromised herald process do far more than these four things.
+#
+# Install as /etc/sudoers.d/herald (mode 0440, owned by root), and always
+# validate with `visudo -cf /etc/sudoers.d/herald` before/after editing -
+# a broken sudoers file can lock out sudo entirely.
+#
+# The trailing "*" on the "add element" line matches the set-element body
+# (the IP + timeout), e.g. "{ 203.0.113.5 timeout 900s }" - sudo's pattern
+# matching treats it as a wildcard over the rest of the command line.
+
+herald ALL=(root) NOPASSWD: \
+    /usr/sbin/nft add element inet filter allowed_ips *, \
+    /usr/sbin/nft -j list set inet filter allowed_ips, \
+    /usr/sbin/nft flush set inet filter allowed_ips, \
+    /usr/bin/systemctl restart blog

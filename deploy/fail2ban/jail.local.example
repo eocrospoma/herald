@@ -1,0 +1,12 @@
+# Copy this stanza into /etc/fail2ban/jail.local (don't overwrite the
+# whole file - jail.local is meant to hold only your local overrides/
+# additions alongside jail.conf's defaults).
+
+[herald]
+enabled  = true
+filter   = herald
+logpath  = /var/log/herald/audit.jsonl
+backend  = auto
+maxretry = 5
+findtime = 10m
+bantime  = 1h

@@ -1,0 +1,31 @@
+[Unit]
+Description=Herald - TOTP-gated access executor
+After=network.target
+
+[Service]
+Type=simple
+User=herald
+Group=herald
+EnvironmentFile=/etc/herald/herald.env
+ExecStart=/usr/local/bin/herald
+Restart=on-failure
+RestartSec=5
+
+# Least-privilege hardening. Herald itself never touches the filesystem
+# beyond its own audit log - the actual privileged work (nftables,
+# systemctl) happens via the narrowly-scoped sudo rule in sudoers.example,
+# run as root in its own process, not inside this sandboxed one.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/log/herald
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target
