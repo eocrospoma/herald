@@ -2,7 +2,8 @@
 
 A small HTTP service exposing a fixed, closed set of TOTP-gated verbs for
 managing access to this host from anywhere - most importantly, whitelisting
-the caller's own IP into the host firewall.
+the caller's own IP so it can reach the sensitive nginx-fronted dashboards
+(ArgoCD, Vault, Grafana, Prometheus, ...) from a browser.
 
 ## Design
 
@@ -23,15 +24,24 @@ the caller's own IP into the host firewall.
   nothing happens," not obscurity. fail2ban on repeated 401s
   (`deploy/fail2ban/`) is defense-in-depth on top of that, not the real
   gate.
+- **Whitelisting works through nginx's own config, not a host firewall.**
+  All vhosts (public and sensitive) share the same `nginx:443`, multiplexed
+  by Host header/SNI - a kernel firewall (nftables/iptables) filters by
+  IP+port, so it can't distinguish between them. The sensitive vhosts are
+  instead gated by nginx's own per-server-block `allow`/`deny`
+  (`whitelist.conf`), so Herald's `/herald/wl` edits that file directly (in
+  a block it alone owns - see `actions/nginx_whitelist.go`) and reloads
+  nginx. A background sweeper revokes expired entries the same way. SSH
+  isn't in scope here - if it ever needs its own gate, that'll be a
+  Tailscale/Headscale-style VPN decision, not another Herald verb.
 - **Runs directly on the host, deliberately not Kubernetes.** It mutates
-  the host firewall and host services, which in k8s would need a
-  privileged/hostNetwork pod (an anti-pattern); and as the
-  emergency-access tool, it can't depend on the cluster it grants access
-  to. It sits behind the existing host-nginx for TLS and a consistent
-  access-log format.
+  host config and host services; as the emergency-access tool, it also
+  can't depend on the cluster it might be used to reach. It sits behind
+  the existing host-nginx for TLS and a consistent access-log format.
 - **Least privilege throughout:** a dedicated unprivileged user, one
   narrowly-scoped sudoers rule for the exact command lines Herald needs
-  (see `deploy/sudoers.example`), systemd sandboxing
+  (see `deploy/sudoers.example` - writing `whitelist.conf` itself needs no
+  sudo, only validating and reloading nginx does), systemd sandboxing
   (`deploy/herald.service`), and an append-only JSON-Lines audit log for
   every request.
 
@@ -39,10 +49,10 @@ the caller's own IP into the host firewall.
 
 | Path | Method | Does |
 |---|---|---|
-| `/herald/wl?code=NNNNNN` | GET | Whitelists the request's own source IP into an nftables set with a native per-element timeout (900s). Reapplying the same IP just refreshes the timeout - idempotent by construction, no separate revocation scheduler needed. |
+| `/herald/wl?code=NNNNNN` | GET | Whitelists the request's own source IP in nginx's `whitelist.conf` for `HERALD_WHITELIST_TTL` (default 15m). Reapplying the same IP just refreshes its expiry. |
 | `/herald/reload-blog?code=NNNNNN` | GET | Restarts the hardcoded `blog` systemd unit. |
-| `/herald/status?code=NNNNNN` | GET | Read-only: current whitelist contents (`nft -j list set`) + the last 20 audit-log entries. |
-| `/herald/revoke-all` | POST (`code` in the form body) | Clears every whitelisted IP. POST, not GET, specifically because it's destructive and shouldn't be bookmarkable or end up in a GET history by accident. |
+| `/herald/status?code=NNNNNN` | GET | Read-only: currently-whitelisted IPs + time remaining, plus the last 20 audit-log entries. |
+| `/herald/revoke-all` | POST (`code` in the form body) | Clears every IP Herald has whitelisted (not the file's hand-maintained entries). POST, not GET, specifically because it's destructive and shouldn't be bookmarkable or end up in a GET history by accident. |
 
 A path outside this table gets a 404 with zero side effects.
 
@@ -55,16 +65,20 @@ is never meant to be reached directly.
 
 ## Deploying
 
-1. `go build -o herald .`
-2. Create a dedicated user: `useradd --system --no-create-home herald`
-3. Copy `.env.example` to `/etc/herald/herald.env`, fill in a real
+1. `GOOS=linux GOARCH=amd64 go build -o herald .` (cross-compile from the
+   dev machine - no need to install Go on the target host).
+2. Create a dedicated user: `useradd --system --no-create-home herald`.
+3. Follow `deploy/nginx-whitelist-markers.md` once, against the real
+   `whitelist.conf` - adds Herald's managed-block markers and the
+   group-write permission it needs.
+4. Copy `.env.example` to `/etc/herald/herald.env`, fill in a real
    `HERALD_TOTP_SECRET` (`openssl rand -base64 32`), lock down permissions.
-4. Install `deploy/herald.service` to `/etc/systemd/system/`, `deploy/sudoers.example`
-   to `/etc/sudoers.d/herald` (validate with `visudo -cf`), and the
-   fail2ban filter/jail from `deploy/fail2ban/`.
-5. Add an nginx vhost proxying to `HERALD_LISTEN_ADDR` (loopback-only by
+5. Install `deploy/herald.service` to `/etc/systemd/system/`,
+   `deploy/sudoers.example` to `/etc/sudoers.d/herald` (validate with
+   `visudo -cf`), and the fail2ban filter/jail from `deploy/fail2ban/`.
+6. Add an nginx vhost proxying to `HERALD_LISTEN_ADDR` (loopback-only by
    default - never expose Herald directly).
-6. `systemctl enable --now herald`
+7. `systemctl enable --now herald`
 
 ## Testing
 
@@ -74,5 +88,7 @@ go test ./...
 
 The TOTP core is checked against the official RFC 4226 Appendix D and
 RFC 6238 Appendix B test vectors, plus drift/replay/purge behavior. The
-privileged actions (`nft`, `systemctl`) run through an injectable
-`Runner`, so `go test ./...` never shells out to a real command.
+privileged actions (`nginx -t`, `systemctl reload/restart`) run through an
+injectable `Runner`, so `go test ./...` never shells out to a real
+command; the whitelist.conf parsing/rewriting/rollback logic is tested
+directly against temp files.

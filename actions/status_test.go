@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeTempAuditLog(t *testing.T, lines []string) string {
@@ -22,12 +23,15 @@ func writeTempAuditLog(t *testing.T, lines []string) string {
 }
 
 func TestStatus_CombinesWhitelistAndAuditTail(t *testing.T) {
-	runner := &fakeRunner{out: []byte(`[{"nftables":[]}]`)}
+	path := writeTempWhitelistConf(t, []string{
+		"allow 203.0.113.5; # herald-wl expires=" + time.Now().Add(10*time.Minute).UTC().Format(time.RFC3339),
+	})
 	logPath := writeTempAuditLog(t, []string{
 		`{"action":"wl","result":"ok"}`,
 		`{"action":"status","result":"ok"}`,
 	})
-	a, _ := newTestActions(runner)
+	a, _ := newTestActions(&fakeRunner{})
+	a.WhitelistPath = path
 	a.AuditLogPath = logPath
 
 	req := httptest.NewRequest(http.MethodGet, "/herald/status", nil)
@@ -46,24 +50,52 @@ func TestStatus_CombinesWhitelistAndAuditTail(t *testing.T) {
 	if resp.WhitelistError != "" {
 		t.Errorf("whitelist_error = %q, want empty", resp.WhitelistError)
 	}
+	if len(resp.Whitelist) != 1 || resp.Whitelist[0].IP != "203.0.113.5" {
+		t.Errorf("whitelist = %+v, want one entry for 203.0.113.5", resp.Whitelist)
+	}
 	if len(resp.RecentAudit) != 2 {
 		t.Errorf("recent_audit has %d entries, want 2", len(resp.RecentAudit))
 	}
 }
 
-func TestStatus_ReportsNftFailureWithoutFailingTheRequest(t *testing.T) {
-	runner := &fakeRunner{out: []byte("permission denied"), err: errFake}
+func TestStatus_OmitsExpiredEntries(t *testing.T) {
+	path := writeTempWhitelistConf(t, []string{
+		"allow 203.0.113.5; # herald-wl expires=" + time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+	})
 	logPath := writeTempAuditLog(t, []string{`{"action":"wl","result":"ok"}`})
-	a, _ := newTestActions(runner)
+	a, _ := newTestActions(&fakeRunner{})
+	a.WhitelistPath = path
 	a.AuditLogPath = logPath
 
 	req := httptest.NewRequest(http.MethodGet, "/herald/status", nil)
 	rr := httptest.NewRecorder()
+	a.Status(rr, req)
 
+	var resp statusResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response is not valid JSON: %v", err)
+	}
+	if len(resp.Whitelist) != 0 {
+		t.Errorf("whitelist = %+v, want no entries (already expired, not yet swept)", resp.Whitelist)
+	}
+}
+
+func TestStatus_ReportsWhitelistParseErrorWithoutFailingTheRequest(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "whitelist.conf")
+	if err := os.WriteFile(path, []byte("allow 1.2.3.4;\ndeny all;\n"), 0o644); err != nil {
+		t.Fatalf("writing malformed whitelist.conf: %v", err)
+	}
+	logPath := writeTempAuditLog(t, []string{`{"action":"wl","result":"ok"}`})
+	a, _ := newTestActions(&fakeRunner{})
+	a.WhitelistPath = path
+	a.AuditLogPath = logPath
+
+	req := httptest.NewRequest(http.MethodGet, "/herald/status", nil)
+	rr := httptest.NewRecorder()
 	a.Status(rr, req)
 
 	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (nft failure is reported in the body, not a 500)", rr.Code)
+		t.Fatalf("status = %d, want 200 (parse failure is reported in the body, not a 500)", rr.Code)
 	}
 
 	var resp statusResponse
@@ -71,7 +103,7 @@ func TestStatus_ReportsNftFailureWithoutFailingTheRequest(t *testing.T) {
 		t.Fatalf("response is not valid JSON: %v", err)
 	}
 	if resp.WhitelistError == "" {
-		t.Error("whitelist_error is empty, want the nft failure reported")
+		t.Error("whitelist_error is empty, want the missing-markers failure reported")
 	}
 }
 

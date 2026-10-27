@@ -5,17 +5,23 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"time"
 )
 
-// statusResponse mixes the live nftables set (active IPs + remaining TTL)
-// with the tail of the audit log. Fields use json.RawMessage so the
-// underlying JSON (from nft -j, and from each already-JSON audit line)
-// passes through unmodified instead of being re-encoded as a string.
+type whitelistStatusEntry struct {
+	IP        string `json:"ip"`
+	ExpiresIn string `json:"expires_in"`
+}
+
+// statusResponse mixes Herald's current managed whitelist entries with the
+// tail of the audit log. RecentAudit uses json.RawMessage so each
+// already-JSON audit line passes through unmodified instead of being
+// re-encoded as a string.
 type statusResponse struct {
-	Whitelist      json.RawMessage   `json:"whitelist,omitempty"`
-	WhitelistError string            `json:"whitelist_error,omitempty"`
-	RecentAudit    []json.RawMessage `json:"recent_audit,omitempty"`
-	AuditError     string            `json:"audit_error,omitempty"`
+	Whitelist      []whitelistStatusEntry `json:"whitelist,omitempty"`
+	WhitelistError string                 `json:"whitelist_error,omitempty"`
+	RecentAudit    []json.RawMessage      `json:"recent_audit,omitempty"`
+	AuditError     string                 `json:"audit_error,omitempty"`
 }
 
 // Status handles GET /herald/status: read-only, reports the current
@@ -23,11 +29,20 @@ type statusResponse struct {
 func (a *Actions) Status(w http.ResponseWriter, r *http.Request) {
 	var resp statusResponse
 
-	out, err := a.Runner.Run("sudo", "nft", "-j", "list", "set", "inet", "filter", nftSet)
+	wf, err := loadWhitelistFile(a.WhitelistPath)
 	if err != nil {
-		resp.WhitelistError = cmdError(err, out).Error()
+		resp.WhitelistError = err.Error()
 	} else {
-		resp.Whitelist = json.RawMessage(out)
+		now := time.Now()
+		for _, e := range wf.entries {
+			if !e.Expires.After(now) {
+				continue // already expired, just hasn't been swept yet
+			}
+			resp.Whitelist = append(resp.Whitelist, whitelistStatusEntry{
+				IP:        e.IP,
+				ExpiresIn: e.Expires.Sub(now).Round(time.Second).String(),
+			})
+		}
 	}
 
 	lines, err := tailLines(a.AuditLogPath, statusLogLines)

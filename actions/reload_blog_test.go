@@ -8,7 +8,7 @@ import (
 )
 
 func TestReloadBlog_Success(t *testing.T) {
-	runner := &fakeRunner{out: []byte("ok")}
+	runner := &fakeRunner{}
 	a, _ := newTestActions(runner)
 
 	req := httptest.NewRequest(http.MethodGet, "/herald/reload-blog", nil)
@@ -26,7 +26,7 @@ func TestReloadBlog_Success(t *testing.T) {
 }
 
 func TestReloadBlog_CommandFailureReturns500AndLogsError(t *testing.T) {
-	runner := &fakeRunner{out: []byte("unit not found"), err: errFake}
+	runner := &fakeRunner{responses: []cmdResult{{out: []byte("unit not found"), err: errFake}}}
 	a, buf := newTestActions(runner)
 
 	req := httptest.NewRequest(http.MethodGet, "/herald/reload-blog", nil)

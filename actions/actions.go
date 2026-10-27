@@ -7,19 +7,17 @@ package actions
 import (
 	"fmt"
 	"os/exec"
+	"sync"
+	"time"
 
 	"github.com/eocrospoma/herald/audit"
 )
 
-const (
-	nftSet           = "allowed_ips"
-	whitelistTimeout = "900s"
-	statusLogLines   = 20
-)
+const statusLogLines = 20
 
 // Runner executes an external command and returns its combined output.
 // Abstracted so tests can substitute a fake instead of shelling out to the
-// real nft/systemctl/sudo, which don't exist outside the deploy target.
+// real nginx/systemctl/sudo, which don't exist outside the deploy target.
 type Runner interface {
 	Run(name string, args ...string) ([]byte, error)
 }
@@ -34,19 +32,32 @@ func (execRunner) Run(name string, args ...string) ([]byte, error) {
 	return exec.Command(name, args...).CombinedOutput()
 }
 
-// Actions holds what the handlers need beyond the request itself: how to
-// run commands, and where to send audit entries for operational failures
-// (the registry's middleware already logs "ok"/"unauthorized" for every
-// request - this covers errors from the underlying command itself).
+// Actions holds what the handlers need beyond the request itself.
 type Actions struct {
 	Runner       Runner
 	Log          *audit.Logger
 	AuditLogPath string
+
+	// WhitelistPath is nginx's whitelist.conf - see nginx_whitelist.go for
+	// the file format and why Herald owns only a delimited block of it.
+	WhitelistPath string
+	WhitelistTTL  time.Duration
+
+	// whitelistMu serializes every read-modify-write of WhitelistPath
+	// (Whitelist, RevokeAll, and the background expiry sweeper all go
+	// through it), since the file itself has no locking of its own.
+	whitelistMu sync.Mutex
 }
 
 // New builds production Actions, backed by the real exec.Command runner.
-func New(log *audit.Logger, auditLogPath string) *Actions {
-	return &Actions{Runner: execRunner{}, Log: log, AuditLogPath: auditLogPath}
+func New(log *audit.Logger, auditLogPath, whitelistPath string, whitelistTTL time.Duration) *Actions {
+	return &Actions{
+		Runner:        execRunner{},
+		Log:           log,
+		AuditLogPath:  auditLogPath,
+		WhitelistPath: whitelistPath,
+		WhitelistTTL:  whitelistTTL,
+	}
 }
 
 func (a *Actions) logError(action, ip string, err error) {

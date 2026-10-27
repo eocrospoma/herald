@@ -18,10 +18,16 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/eocrospoma/herald/actions"
 	"github.com/eocrospoma/herald/audit"
 )
+
+// sweepInterval is how often the background sweeper checks for expired
+// whitelist entries - independent of WhitelistTTL, just how promptly an
+// expiry is actually noticed and acted on.
+const sweepInterval = time.Minute
 
 func main() {
 	cfg, err := LoadConfig()
@@ -40,7 +46,15 @@ func main() {
 
 	auditLog := audit.NewLogger(logFile)
 	verifier := NewTOTPVerifier(cfg.TOTPSecret)
-	act := actions.New(auditLog, cfg.AuditLogPath)
+	act := actions.New(auditLog, cfg.AuditLogPath, cfg.WhitelistPath, cfg.WhitelistTTL)
+
+	go func() {
+		for range time.Tick(sweepInterval) {
+			if err := act.SweepExpiredWhitelist(); err != nil {
+				log.Printf("whitelist sweep: %v", err)
+			}
+		}
+	}()
 
 	reg := registry{
 		"/herald/wl": {

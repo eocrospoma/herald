@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"time"
 )
 
 // Config holds Herald's runtime configuration, populated from environment
@@ -20,6 +21,14 @@ type Config struct {
 
 	// AuditLogPath is where the JSON-Lines audit log is appended.
 	AuditLogPath string
+
+	// WhitelistPath is nginx's whitelist.conf, which must already have
+	// Herald's managed-block markers (see actions/nginx_whitelist.go).
+	WhitelistPath string
+
+	// WhitelistTTL is how long a whitelisted IP stays allowed before the
+	// background sweeper (see main.go) removes it.
+	WhitelistTTL time.Duration
 }
 
 // LoadConfig reads configuration from the environment. It returns an error
@@ -41,9 +50,25 @@ func LoadConfig() (Config, error) {
 		logPath = "/var/log/herald/audit.jsonl"
 	}
 
+	whitelistPath := os.Getenv("HERALD_WHITELIST_PATH")
+	if whitelistPath == "" {
+		whitelistPath = "/etc/nginx/sites-available/whitelist.conf"
+	}
+
+	ttl := 15 * time.Minute
+	if raw := os.Getenv("HERALD_WHITELIST_TTL"); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("HERALD_WHITELIST_TTL %q: %w", raw, err)
+		}
+		ttl = parsed
+	}
+
 	return Config{
-		ListenAddr:   addr,
-		TOTPSecret:   []byte(secret),
-		AuditLogPath: logPath,
+		ListenAddr:    addr,
+		TOTPSecret:    []byte(secret),
+		AuditLogPath:  logPath,
+		WhitelistPath: whitelistPath,
+		WhitelistTTL:  ttl,
 	}, nil
 }

@@ -11,15 +11,16 @@ ExecStart=/usr/local/bin/herald
 Restart=on-failure
 RestartSec=5
 
-# Least-privilege hardening. Herald itself never touches the filesystem
-# beyond its own audit log - the actual privileged work (nftables,
-# systemctl) happens via the narrowly-scoped sudo rule in sudoers.example,
-# run as root in its own process, not inside this sandboxed one.
+# Least-privilege hardening. Herald writes its own audit log and
+# whitelist.conf's managed block directly (group-write, no sudo - see
+# nginx-whitelist-markers.md); validating and reloading nginx happens via
+# the narrowly-scoped sudo rule in sudoers.example, run as root in its own
+# process, not inside this sandboxed one.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/var/log/herald
+ReadWritePaths=/var/log/herald /etc/nginx/sites-available
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
